@@ -15,8 +15,21 @@ from PIL import Image, ImageTk, ImageFilter, ImageDraw
 from nudenet import NudeDetector
 
 APP_TITLE = "Screen Censor 4.0"
-BREAST_LABEL = "FEMALE_BREAST_EXPOSED"
-BREAST_THRESHOLD = 0.28
+# NudeNet classes used for breast/genital-area censoring. Covered labels are
+# supported only if the bundled model actually emits them.
+CENSOR_LABELS = {
+    "FEMALE_BREAST_EXPOSED",
+    "FEMALE_BREAST_COVERED",
+    "FEMALE_GENITALIA_EXPOSED",
+    "FEMALE_GENITALIA_COVERED",
+}
+LABEL_THRESHOLDS = {
+    "FEMALE_BREAST_EXPOSED": 0.28,
+    "FEMALE_BREAST_COVERED": 0.35,
+    "FEMALE_GENITALIA_EXPOSED": 0.28,
+    "FEMALE_GENITALIA_COVERED": 0.35,
+}
+SMOOTHING_ALPHA = 0.62  # higher = follows new detections faster
 DETECTION_INTERVAL = 0.30      # AI detection is hardware-dependent, not 30 FPS.
 OVERLAY_REFRESH_MS = 33        # Overlay redraw target: ~30 FPS.
 BOX_PADDING = 0.22
@@ -71,11 +84,12 @@ class ScreenCensor:
         self.overlay_hwnd = None
         self.last_error = None
         self.frame_size = (0, 0)
+        self.previous_boxes = []
         self.hotkey_registered = False
 
         tk.Label(root, text="SCREEN CENSOR 4.0", fg="white", bg="#151923",
                  font=("Segoe UI", 17, "bold")).pack(pady=(16, 3))
-        tk.Label(root, text="Desktop blur overlay • wajah + area dada terbuka",
+        tk.Label(root, text="Desktop blur overlay • wajah + area tubuh terdeteksi model",
                  fg="#b9c2d0", bg="#151923", font=("Segoe UI", 9)).pack()
 
         self.status = tk.Label(root, text="Status: Mati", fg="#ff7777",
@@ -294,7 +308,7 @@ class ScreenCensor:
                 for item in self.detector.detect(temp_name):
                     label = str(item.get("class", "")).upper()
                     score = float(item.get("score", 0))
-                    if label != BREAST_LABEL or score < BREAST_THRESHOLD:
+                    if label not in CENSOR_LABELS or score < LABEL_THRESHOLDS.get(label, 0.35):
                         continue
                     bx, by, bw, bh = [float(v) for v in item.get("box", [0, 0, 0, 0])]
                     px, py = int(bw * BOX_PADDING), int(bh * BOX_PADDING)
@@ -329,6 +343,34 @@ class ScreenCensor:
                 kept.append(box)
         return kept
 
+    @staticmethod
+    def _smooth_boxes(current, previous, alpha=SMOOTHING_ALPHA):
+        """Match nearby detections and smooth their coordinates to reduce jitter."""
+        smoothed = []
+        used = set()
+        for box in current:
+            x1, y1, x2, y2, label = box
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            bw, bh = max(1, x2 - x1), max(1, y2 - y1)
+            best_i, best_dist = None, float("inf")
+            for i, old in enumerate(previous):
+                if i in used or old[4] != label:
+                    continue
+                ox1, oy1, ox2, oy2, _ = old
+                ocx, ocy = (ox1 + ox2) / 2, (oy1 + oy2) / 2
+                dist = ((cx - ocx) ** 2 + (cy - ocy) ** 2) ** 0.5
+                if dist < max(bw, bh) * 0.8 and dist < best_dist:
+                    best_i, best_dist = i, dist
+            if best_i is not None:
+                used.add(best_i)
+                old = previous[best_i]
+                coords = [round(alpha * new + (1 - alpha) * oldv)
+                          for new, oldv in zip((x1, y1, x2, y2), old[:4])]
+                smoothed.append((*coords, label))
+            else:
+                smoothed.append(box)
+        return smoothed
+
     def _scan_loop(self):
         with mss.mss() as sct:
             monitor = sct.monitors[1]  # primary display
@@ -351,6 +393,9 @@ class ScreenCensor:
                     x2,y2 = int((x+fw)*inv), int((y+fh)*inv)
                     boxes.append((x1,y1,x2,y2,"losser"))
                 boxes.extend(self._nudenet_boxes(frame))
+                with self.lock:
+                    previous = list(self.previous_boxes)
+                boxes = self._smooth_boxes(boxes, previous)
                 # Prepare blurred screen patches. The live overlay renderer only
                 # redraws these cached patches at 30 FPS; AI inference runs slower.
                 patches = []
@@ -364,6 +409,7 @@ class ScreenCensor:
                     patches.append((x1,y1,patch,label))
                 with self.lock:
                     self.boxes = boxes
+                    self.previous_boxes = boxes
                     self.patch_data = patches
                     self.frame_size = (w,h)
                 elapsed = time.perf_counter() - started
@@ -381,11 +427,14 @@ class ScreenCensor:
                 self.canvas.create_image(x, y, image=photo, anchor="nw")
                 self.canvas.create_rectangle(x, y, x+patch.width, y+patch.height,
                                              outline="#ff4d6d", width=2)
-                tag_h = 22
-                self.canvas.create_rectangle(x, y, x+70, y+tag_h,
-                                             fill="#151923", outline="#ff4d6d", width=1)
-                self.canvas.create_text(x+35, y+tag_h/2, text="losser",
-                                        fill="white", font=("Segoe UI", 10, "bold"))
+                # Put LOOSER in the center of each censored region.
+                center_x = x + patch.width / 2
+                center_y = y + patch.height / 2
+                self.canvas.create_text(
+                    center_x, center_y, text="LOOSER", anchor="center",
+                    fill="white", font=("Segoe UI", 12, "bold"),
+                    width=max(70, patch.width - 8)
+                )
             self.overlay.lift()
         self.root.after(OVERLAY_REFRESH_MS, self.refresh_overlay)
 
@@ -401,6 +450,7 @@ class ScreenCensor:
             pass
         with self.lock:
             self.boxes = []
+            self.previous_boxes = []
             self.patch_data = []
         self.canvas.delete("all")
         self.patch_images = []
@@ -427,4 +477,4 @@ class ScreenCensor:
 if __name__ == "__main__":
     root = tk.Tk()
     app = ScreenCensor(root)
-    root.mainloop()         
+    root.mainloop()
