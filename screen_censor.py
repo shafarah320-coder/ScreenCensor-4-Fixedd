@@ -67,7 +67,7 @@ class ScreenCensor:
             raise RuntimeError("Screen Censor 4.0 Desktop Overlay hanya untuk Windows 10/11.")
         self.root = root
         root.title(APP_TITLE)
-        root.geometry("430x300")
+        root.geometry("470x360")
         root.resizable(False, False)
         root.configure(bg="#151923")
         root.attributes("-topmost", True)
@@ -82,6 +82,8 @@ class ScreenCensor:
         self.patch_version = 0
         self.rendered_patch_version = -1
         self.sensor_mode = tk.StringVar(value="Blur + LOOSER")
+        self.scan_target = tk.StringVar(value="Semua target")
+        self.full_blur_image = None
         self.detector = None
         self.worker = None
         self.overlay_hwnd = None
@@ -117,7 +119,7 @@ class ScreenCensor:
                  font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 8))
         self.mode_menu = tk.OptionMenu(
             mode_row, self.sensor_mode,
-            "Blur + LOOSER", "LOOSER saja", "TV semut",
+            "Blur + LOOSER", "LOOSER tunggal", "TV semut", "Blur semua + fokus",
             command=self._change_sensor_mode
         )
         self.mode_menu.config(bg="#283244", fg="white", activebackground="#35445c",
@@ -125,6 +127,22 @@ class ScreenCensor:
         self.mode_menu["menu"].config(bg="#283244", fg="white")
         self.mode_menu.pack(side="left")
 
+        target_row = tk.Frame(root, bg="#151923")
+        target_row.pack(pady=(10, 0))
+        tk.Label(target_row, text="Scan bagian:", fg="#b9c2d0", bg="#151923",
+                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 8))
+        self.target_menu = tk.OptionMenu(
+            target_row, self.scan_target,
+            "Semua target", "Dada saja", "Wajah saja", "Bagian intim saja",
+            command=self._change_scan_target
+        )
+        self.target_menu.config(bg="#283244", fg="white", activebackground="#35445c",
+                                activeforeground="white", relief="flat", highlightthickness=0)
+        self.target_menu["menu"].config(bg="#283244", fg="white")
+        self.target_menu.pack(side="left")
+
+        tk.Label(root, text="Blur semua + fokus: layar diblur, area target terdeteksi tetap jelas.",
+                 fg="#9aa5b5", bg="#151923", font=("Segoe UI", 8)).pack(pady=(8, 0))
         tk.Label(root, text="Tombol darurat global: Ctrl + Shift + F12",
                  fg="#ffd166", bg="#151923", font=("Segoe UI", 9, "bold")).pack(pady=(14, 3))
         tk.Label(root, text="Overlay desktop di atas aplikasi lain • label: losser",
@@ -264,6 +282,14 @@ class ScreenCensor:
         with self.lock:
             self.patch_version += 1
 
+    def _change_scan_target(self, _selected=None):
+        # Target selection affects the next AI scan; clear old detections immediately.
+        with self.lock:
+            self.boxes = []
+            self.previous_boxes = []
+            self.patch_data = []
+            self.patch_version += 1
+
     @staticmethod
     def _make_static_noise(size):
         width, height = max(1, size[0]), max(1, size[1])
@@ -273,24 +299,9 @@ class ScreenCensor:
     def _render_sensor_patch(self, source_patch, mode):
         if mode == "Blur + LOOSER":
             return source_patch.filter(ImageFilter.GaussianBlur(BLUR_RADIUS))
-        if mode == "LOOSER saja":
-            # Tile the requested label across the detected area, with no blur.
-            layer = Image.new("RGB", source_patch.size, (18, 18, 22))
-            draw = ImageDraw.Draw(layer)
-            font_size = max(12, min(34, source_patch.height // 3))
-            try:
-                font = ImageFont.truetype("arialbd.ttf", font_size)
-            except Exception:
-                font = ImageFont.load_default()
-            text = "LOOSER"
-            bbox = draw.textbbox((0, 0), text, font=font, stroke_width=1)
-            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            step_x, step_y = max(tw + 18, 75), max(th + 14, 36)
-            for yy in range(-step_y, layer.height + step_y, step_y):
-                for xx in range(-step_x, layer.width + step_x, step_x):
-                    draw.text((xx, yy), text, fill="white", font=font,
-                              stroke_width=1, stroke_fill="#555555")
-            return layer
+        if mode == "LOOSER tunggal":
+            # The actual target is left untouched; a single label is drawn by the canvas.
+            return source_patch
         if mode == "TV semut":
             return self._make_static_noise(source_patch.size)
         return source_patch.filter(ImageFilter.GaussianBlur(BLUR_RADIUS))
@@ -370,7 +381,8 @@ class ScreenCensor:
                     x2 = min(w, int(ox + bx + bw) + px)
                     y2 = min(h, int(oy + by + bh) + py)
                     if x2 > x1 and y2 > y1:
-                        found.append((x1, y1, x2, y2, "losser"))
+                        category = "breast" if "BREAST" in label else "genital"
+                        found.append((x1, y1, x2, y2, category))
             finally:
                 if temp_name and os.path.exists(temp_name):
                     try:
@@ -441,11 +453,18 @@ class ScreenCensor:
                 )
                 boxes = []
                 inv = 1.0 / scale
-                for x,y,fw,fh in faces:
-                    x1,y1 = int(x*inv), int(y*inv)
-                    x2,y2 = int((x+fw)*inv), int((y+fh)*inv)
-                    boxes.append((x1,y1,x2,y2,"losser"))
-                boxes.extend(self._nudenet_boxes(frame))
+                selected = self.scan_target.get()
+                if selected in ("Semua target", "Wajah saja"):
+                    for x,y,fw,fh in faces:
+                        x1,y1 = int(x*inv), int(y*inv)
+                        x2,y2 = int((x+fw)*inv), int((y+fh)*inv)
+                        boxes.append((x1,y1,x2,y2,"face"))
+                if selected in ("Semua target", "Dada saja", "Bagian intim saja"):
+                    wanted = ("breast" if selected == "Dada saja" else
+                              "genital" if selected == "Bagian intim saja" else None)
+                    for item_box in self._nudenet_boxes(frame):
+                        if wanted is None or item_box[4] == wanted:
+                            boxes.append(item_box)
                 with self.lock:
                     previous = list(self.previous_boxes)
                 boxes = self._smooth_boxes(boxes, previous)
@@ -460,7 +479,9 @@ class ScreenCensor:
                         continue
                     patch = screen.crop((x1,y1,x2,y2))
                     patches.append((x1,y1,patch,label))
+                full_blur = screen.filter(ImageFilter.GaussianBlur(BLUR_RADIUS * 2))
                 with self.lock:
+                    self.full_blur_image = full_blur
                     self.boxes = boxes
                     self.previous_boxes = boxes
                     self.patch_data = patches
@@ -480,21 +501,34 @@ class ScreenCensor:
             if patches is not None:
                 self.canvas.delete("all")
                 self.patch_images = []
-                for x, y, source_patch, label in patches:
-                    patch = self._render_sensor_patch(source_patch, mode)
-                    photo = ImageTk.PhotoImage(patch)
-                    self.patch_images.append(photo)
-                    self.canvas.create_image(x, y, image=photo, anchor="nw")
-                    self.canvas.create_rectangle(
-                        x, y, x + patch.width, y + patch.height,
-                        outline="#ff4d6d", width=2
-                    )
-                    self.canvas.create_text(
-                        x + patch.width / 2, y + patch.height / 2,
-                        text="LOOSER", anchor="center", fill="white",
-                        font=("Segoe UI", 12, "bold"),
-                        width=max(70, patch.width - 8)
-                    )
+                if mode == "Blur semua + fokus":
+                    with self.lock:
+                        background = self.full_blur_image.copy() if self.full_blur_image else None
+                    if background is not None:
+                        # Magenta cut-outs reveal the original desktop only inside detected target boxes.
+                        draw = ImageDraw.Draw(background)
+                        for x, y, source_patch, label in patches:
+                            draw.rectangle((x, y, x + source_patch.width, y + source_patch.height),
+                                           fill=(255, 0, 255))
+                        photo = ImageTk.PhotoImage(background)
+                        self.patch_images.append(photo)
+                        self.canvas.create_image(0, 0, image=photo, anchor="nw")
+                else:
+                    for x, y, source_patch, label in patches:
+                        if mode == "LOOSER tunggal":
+                            # Text only: no backing rectangle, blur, or border.
+                            self.canvas.create_text(
+                                x + source_patch.width / 2, y + source_patch.height / 2,
+                                text="LOOSER", anchor="center", fill="white",
+                                font=("Segoe UI", max(10, min(24, source_patch.height // 2)), "bold"),
+                                width=max(70, source_patch.width - 8),
+                                stipple="gray50"
+                            )
+                            continue
+                        patch = self._render_sensor_patch(source_patch, mode)
+                        photo = ImageTk.PhotoImage(patch)
+                        self.patch_images.append(photo)
+                        self.canvas.create_image(x, y, image=photo, anchor="nw")
                 self.rendered_patch_version = version
             self.overlay.lift()
         self.root.after(OVERLAY_REFRESH_MS, self.refresh_overlay)
