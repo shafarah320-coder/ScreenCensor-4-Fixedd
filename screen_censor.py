@@ -29,9 +29,9 @@ LABEL_THRESHOLDS = {
     "FEMALE_GENITALIA_EXPOSED": 0.28,
     "FEMALE_GENITALIA_COVERED": 0.35,
 }
-SMOOTHING_ALPHA = 0.62  # higher = follows new detections faster
-DETECTION_INTERVAL = 0.30      # AI detection is hardware-dependent, not 30 FPS.
-OVERLAY_REFRESH_MS = 33        # Overlay redraw target: ~30 FPS.
+SMOOTHING_ALPHA = 0.72  # follows new detections faster while reducing jitter
+DETECTION_INTERVAL = 0.20      # Requested scan interval; actual AI speed depends on PC/model.
+OVERLAY_REFRESH_MS = 16        # UI refresh target: about 60 Hz; not 60 AI detections/sec.
 BOX_PADDING = 0.22
 BLUR_RADIUS = 15
 TILE_ROWS = 2
@@ -79,6 +79,8 @@ class ScreenCensor:
         self.boxes = []
         self.patch_data = []
         self.patch_images = []
+        self.patch_version = 0
+        self.rendered_patch_version = -1
         self.detector = None
         self.worker = None
         self.overlay_hwnd = None
@@ -112,7 +114,7 @@ class ScreenCensor:
                  fg="#ffd166", bg="#151923", font=("Segoe UI", 9, "bold")).pack(pady=(14, 3))
         tk.Label(root, text="Overlay desktop di atas aplikasi lain • label: losser",
                  fg="#9aa5b5", bg="#151923", font=("Segoe UI", 8)).pack()
-        tk.Label(root, text="Target gambar overlay 30 FPS; kecepatan AI tergantung PC.",
+        tk.Label(root, text="Target refresh overlay 60 FPS; kecepatan AI tergantung PC.",
                  fg="#9aa5b5", bg="#151923", font=("Segoe UI", 8)).pack(pady=(3, 0))
 
         self.overlay = tk.Toplevel(root)
@@ -411,30 +413,36 @@ class ScreenCensor:
                     self.boxes = boxes
                     self.previous_boxes = boxes
                     self.patch_data = patches
+                    self.patch_version += 1
                     self.frame_size = (w,h)
                 elapsed = time.perf_counter() - started
                 time.sleep(max(0.02, DETECTION_INTERVAL - elapsed))
 
     def refresh_overlay(self):
         if self.running and self.overlay.state() != "withdrawn":
+            # Poll at 60 Hz, but rebuild canvas items only when detections change.
             with self.lock:
-                patches = list(self.patch_data)
-            self.canvas.delete("all")
-            self.patch_images = []
-            for x,y,patch,label in patches:
-                photo = ImageTk.PhotoImage(patch)
-                self.patch_images.append(photo)
-                self.canvas.create_image(x, y, image=photo, anchor="nw")
-                self.canvas.create_rectangle(x, y, x+patch.width, y+patch.height,
-                                             outline="#ff4d6d", width=2)
-                # Put LOOSER in the center of each censored region.
-                center_x = x + patch.width / 2
-                center_y = y + patch.height / 2
-                self.canvas.create_text(
-                    center_x, center_y, text="LOOSER", anchor="center",
-                    fill="white", font=("Segoe UI", 12, "bold"),
-                    width=max(70, patch.width - 8)
-                )
+                version = self.patch_version
+                patches = list(self.patch_data) if version != self.rendered_patch_version else None
+
+            if patches is not None:
+                self.canvas.delete("all")
+                self.patch_images = []
+                for x, y, patch, label in patches:
+                    photo = ImageTk.PhotoImage(patch)
+                    self.patch_images.append(photo)
+                    self.canvas.create_image(x, y, image=photo, anchor="nw")
+                    self.canvas.create_rectangle(
+                        x, y, x + patch.width, y + patch.height,
+                        outline="#ff4d6d", width=2
+                    )
+                    self.canvas.create_text(
+                        x + patch.width / 2, y + patch.height / 2,
+                        text="LOOSER", anchor="center", fill="white",
+                        font=("Segoe UI", 12, "bold"),
+                        width=max(70, patch.width - 8)
+                    )
+                self.rendered_patch_version = version
             self.overlay.lift()
         self.root.after(OVERLAY_REFRESH_MS, self.refresh_overlay)
 
