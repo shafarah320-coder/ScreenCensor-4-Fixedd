@@ -11,7 +11,7 @@ from tkinter import messagebox
 import cv2
 import numpy as np
 import mss
-from PIL import Image, ImageTk, ImageFilter, ImageDraw
+from PIL import Image, ImageTk, ImageFilter, ImageDraw, ImageFont
 from nudenet import NudeDetector
 
 APP_TITLE = "Screen Censor 4.0"
@@ -81,6 +81,7 @@ class ScreenCensor:
         self.patch_images = []
         self.patch_version = 0
         self.rendered_patch_version = -1
+        self.sensor_mode = tk.StringVar(value="Blur + LOOSER")
         self.detector = None
         self.worker = None
         self.overlay_hwnd = None
@@ -109,6 +110,20 @@ class ScreenCensor:
                                   bg="#a83e45", fg="white", relief="flat",
                                   font=("Segoe UI", 10, "bold"))
         self.stop_btn.pack(side="left", padx=5)
+
+        mode_row = tk.Frame(root, bg="#151923")
+        mode_row.pack(pady=(2, 0))
+        tk.Label(mode_row, text="Tipe sensor:", fg="#b9c2d0", bg="#151923",
+                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 8))
+        self.mode_menu = tk.OptionMenu(
+            mode_row, self.sensor_mode,
+            "Blur + LOOSER", "LOOSER saja", "TV semut",
+            command=self._change_sensor_mode
+        )
+        self.mode_menu.config(bg="#283244", fg="white", activebackground="#35445c",
+                              activeforeground="white", relief="flat", highlightthickness=0)
+        self.mode_menu["menu"].config(bg="#283244", fg="white")
+        self.mode_menu.pack(side="left")
 
         tk.Label(root, text="Tombol darurat global: Ctrl + Shift + F12",
                  fg="#ffd166", bg="#151923", font=("Segoe UI", 9, "bold")).pack(pady=(14, 3))
@@ -243,6 +258,42 @@ class ScreenCensor:
                 text="Status: AKTIF (capture exclusion unavailable)",
                 fg="#65d69a"
             )
+
+    def _change_sensor_mode(self, _selected=None):
+        # Force a redraw using the selected visual style without restarting AI.
+        with self.lock:
+            self.patch_version += 1
+
+    @staticmethod
+    def _make_static_noise(size):
+        width, height = max(1, size[0]), max(1, size[1])
+        noise = Image.effect_noise((width, height), 100).convert("L").convert("RGB")
+        return noise
+
+    def _render_sensor_patch(self, source_patch, mode):
+        if mode == "Blur + LOOSER":
+            return source_patch.filter(ImageFilter.GaussianBlur(BLUR_RADIUS))
+        if mode == "LOOSER saja":
+            # Tile the requested label across the detected area, with no blur.
+            layer = Image.new("RGB", source_patch.size, (18, 18, 22))
+            draw = ImageDraw.Draw(layer)
+            font_size = max(12, min(34, source_patch.height // 3))
+            try:
+                font = ImageFont.truetype("arialbd.ttf", font_size)
+            except Exception:
+                font = ImageFont.load_default()
+            text = "LOOSER"
+            bbox = draw.textbbox((0, 0), text, font=font, stroke_width=1)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            step_x, step_y = max(tw + 18, 75), max(th + 14, 36)
+            for yy in range(-step_y, layer.height + step_y, step_y):
+                for xx in range(-step_x, layer.width + step_x, step_x):
+                    draw.text((xx, yy), text, fill="white", font=font,
+                              stroke_width=1, stroke_fill="#555555")
+            return layer
+        if mode == "TV semut":
+            return self._make_static_noise(source_patch.size)
+        return source_patch.filter(ImageFilter.GaussianBlur(BLUR_RADIUS))
 
     def start(self):
         if self.running:
@@ -407,7 +458,7 @@ class ScreenCensor:
                     x2,y2 = min(w,x2),min(h,y2)
                     if x2 <= x1 or y2 <= y1:
                         continue
-                    patch = screen.crop((x1,y1,x2,y2)).filter(ImageFilter.GaussianBlur(BLUR_RADIUS))
+                    patch = screen.crop((x1,y1,x2,y2))
                     patches.append((x1,y1,patch,label))
                 with self.lock:
                     self.boxes = boxes
@@ -424,11 +475,13 @@ class ScreenCensor:
             with self.lock:
                 version = self.patch_version
                 patches = list(self.patch_data) if version != self.rendered_patch_version else None
+                mode = self.sensor_mode.get()
 
             if patches is not None:
                 self.canvas.delete("all")
                 self.patch_images = []
-                for x, y, patch, label in patches:
+                for x, y, source_patch, label in patches:
+                    patch = self._render_sensor_patch(source_patch, mode)
                     photo = ImageTk.PhotoImage(patch)
                     self.patch_images.append(photo)
                     self.canvas.create_image(x, y, image=photo, anchor="nw")
