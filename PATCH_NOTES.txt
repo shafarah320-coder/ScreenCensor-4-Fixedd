@@ -1,0 +1,9 @@
+Screen Censor 4.0 overlay compatibility fix
+
+- Corrected pointer-sized Win32 HWND function signatures for 64-bit Windows.
+- Added WDA_EXCLUDEFROMCAPTURE -> WDA_MONITOR fallback.
+- Capture-affinity failure no longer crashes/stops sensor startup.
+- Added SetWindowPos topmost/show attempt without stealing focus.
+
+Validation performed here: Python syntax compilation only.
+Still required: build via GitHub Actions and test on the target Windows PC.
