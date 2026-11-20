@@ -136,18 +136,20 @@ class ScreenCensor:
     def _configure_overlay(self):
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
+
+        # Keep the overlay hidden until the Windows color-key transparency
+        # has been configured. This prevents an opaque full-screen window
+        # from briefly covering the desktop if transparency setup fails.
+        self.overlay.withdraw()
         self.overlay.geometry(f"{sw}x{sh}+0+0")
-        self.overlay.deiconify()
         self.overlay.update_idletasks()
-        # Tkinter returns the native HWND for this top-level Toplevel window.
+
         hwnd = wintypes.HWND(self.overlay.winfo_id())
         if not hwnd:
             raise RuntimeError("Windows tidak memberikan handle untuk jendela overlay.")
 
         user32 = ctypes.WinDLL("user32", use_last_error=True)
 
-        # Declare pointer-sized signatures explicitly. Without these, ctypes may
-        # truncate HWND values on 64-bit Windows and produce WinError 87.
         get_long_ptr = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
         set_long_ptr = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
         get_long_ptr.argtypes = [wintypes.HWND, ctypes.c_int]
@@ -155,17 +157,33 @@ class ScreenCensor:
         set_long_ptr.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
         set_long_ptr.restype = ctypes.c_ssize_t
 
-        style = get_long_ptr(hwnd, GWL_EXSTYLE)
         ctypes.set_last_error(0)
-        set_long_ptr(hwnd, GWL_EXSTYLE,
-                     style | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW)
+        style = get_long_ptr(hwnd, GWL_EXSTYLE)
         if ctypes.get_last_error():
             raise ctypes.WinError(ctypes.get_last_error())
 
-        # Excluding the overlay from screen capture prevents it from capturing
-        # its own blur patches. EXCLUDEFROMCAPTURE is only supported on newer
-        # Windows 10 builds; fall back to MONITOR, then continue without affinity
-        # rather than crashing the entire sensor.
+        ctypes.set_last_error(0)
+        set_long_ptr(
+            hwnd, GWL_EXSTYLE,
+            style | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW
+        )
+        if ctypes.get_last_error():
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        # Explicitly apply the magenta color key. Tk's -transparentcolor
+        # setting alone may not survive changes to extended window styles.
+        set_layered = user32.SetLayeredWindowAttributes
+        set_layered.argtypes = [
+            wintypes.HWND, wintypes.DWORD, wintypes.BYTE, wintypes.DWORD
+        ]
+        set_layered.restype = wintypes.BOOL
+        COLORREF_MAGENTA = 0x00FF00FF
+        LWA_COLORKEY = 0x00000001
+        if not set_layered(hwnd, COLORREF_MAGENTA, 0, LWA_COLORKEY):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        # Capture exclusion is optional; it must never prevent the overlay
+        # from starting or leave an opaque window covering the desktop.
         set_affinity = user32.SetWindowDisplayAffinity
         set_affinity.argtypes = [wintypes.HWND, wintypes.DWORD]
         set_affinity.restype = wintypes.BOOL
@@ -175,23 +193,27 @@ class ScreenCensor:
         elif set_affinity(hwnd, 0x00000001):  # WDA_MONITOR
             affinity_mode = "MONITOR"
 
-        # Keep the overlay above other windows without activating or stealing focus.
+        self.overlay.deiconify()
+        self.overlay.update_idletasks()
+
         set_pos = user32.SetWindowPos
-        set_pos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
-                            ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        set_pos.argtypes = [
+            wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, wintypes.UINT
+        ]
         set_pos.restype = wintypes.BOOL
         HWND_TOPMOST = wintypes.HWND(-1)
         SWP_NOMOVE = 0x0002
         SWP_NOSIZE = 0x0001
         SWP_NOACTIVATE = 0x0010
         SWP_SHOWWINDOW = 0x0040
-        if not set_pos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                       SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW):
-            # Tk's topmost attribute is still active; don't fail solely on SetWindowPos.
+        if not set_pos(
+            hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
+        ):
             self.overlay.lift()
 
         self.overlay_hwnd = hwnd
-        self.overlay.lift()
         if affinity_mode is None:
             self.status.config(
                 text="Status: AKTIF (capture exclusion unavailable)",
