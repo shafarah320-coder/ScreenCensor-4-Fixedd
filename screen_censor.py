@@ -14,7 +14,7 @@ import mss
 from PIL import Image, ImageTk, ImageFilter, ImageDraw, ImageFont
 from nudenet import NudeDetector
 
-APP_TITLE = "Screen Censor 4.0"
+APP_TITLE = "Screen Censor 4.5"
 # NudeNet classes used for breast/genital-area censoring. Covered labels are
 # supported only if the bundled model actually emits them.
 CENSOR_LABELS = {
@@ -92,7 +92,7 @@ class ScreenCensor:
         self.previous_boxes = []
         self.hotkey_registered = False
 
-        tk.Label(root, text="SCREEN CENSOR 4.0", fg="white", bg="#151923",
+        tk.Label(root, text="SCREEN CENSOR 4.5", fg="white", bg="#151923",
                  font=("Segoe UI", 17, "bold")).pack(pady=(16, 3))
         tk.Label(root, text="Desktop blur overlay • wajah + area tubuh terdeteksi model",
                  fg="#b9c2d0", bg="#151923", font=("Segoe UI", 9)).pack()
@@ -145,9 +145,9 @@ class ScreenCensor:
                  fg="#9aa5b5", bg="#151923", font=("Segoe UI", 8)).pack(pady=(8, 0))
         tk.Label(root, text="Tombol darurat global: Ctrl + Shift + F12",
                  fg="#ffd166", bg="#151923", font=("Segoe UI", 9, "bold")).pack(pady=(14, 3))
-        tk.Label(root, text="Overlay desktop di atas aplikasi lain • label: losser",
+        tk.Label(root, text="Overlay desktop di atas aplikasi lain • LOOSER menutup area mata",
                  fg="#9aa5b5", bg="#151923", font=("Segoe UI", 8)).pack()
-        tk.Label(root, text="Target refresh overlay 60 FPS; kecepatan AI tergantung PC.",
+        tk.Label(root, text="Deteksi wajah berlaku untuk semua wajah; aplikasi tidak menebak gender.",
                  fg="#9aa5b5", bg="#151923", font=("Segoe UI", 8)).pack(pady=(3, 0))
 
         self.overlay = tk.Toplevel(root)
@@ -516,14 +516,37 @@ class ScreenCensor:
                 else:
                     for x, y, source_patch, label in patches:
                         if mode == "LOOSER tunggal":
-                            # Text only: no backing rectangle, blur, or border.
-                            self.canvas.create_text(
-                                x + source_patch.width / 2, y + source_patch.height / 2,
-                                text="LOOSER", anchor="center", fill="white",
-                                font=("Segoe UI", max(10, min(24, source_patch.height // 2)), "bold"),
-                                width=max(70, source_patch.width - 8),
-                                stipple="gray50"
-                            )
+                            patch_w, patch_h = source_patch.size
+                            if label == "face":
+                                # Cover the eye band with a solid, borderless strip.
+                                # The white word is drawn on top; the eyes underneath
+                                # are fully obscured instead of remaining visible
+                                # through transparent text.
+                                eye_x1 = x + int(patch_w * 0.07)
+                                eye_x2 = x + int(patch_w * 0.93)
+                                eye_y1 = y + int(patch_h * 0.30)
+                                eye_y2 = y + int(patch_h * 0.58)
+                                band_h = max(1, eye_y2 - eye_y1)
+                                font_size = max(11, min(28, int(band_h * 0.78)))
+                                self.canvas.create_rectangle(
+                                    eye_x1, eye_y1, eye_x2, eye_y2,
+                                    fill="#050505", outline="#050505", width=0
+                                )
+                                self.canvas.create_text(
+                                    (eye_x1 + eye_x2) / 2,
+                                    (eye_y1 + eye_y2) / 2,
+                                    text="LOOSER", anchor="center", fill="white",
+                                    font=("Segoe UI", font_size, "bold"),
+                                    width=max(40, eye_x2 - eye_x1 - 4)
+                                )
+                            else:
+                                # Non-face targets keep a single centered label.
+                                self.canvas.create_text(
+                                    x + patch_w / 2, y + patch_h / 2,
+                                    text="LOOSER", anchor="center", fill="white",
+                                    font=("Segoe UI", max(10, min(24, patch_h // 2)), "bold"),
+                                    width=max(70, patch_w - 8)
+                                )
                             continue
                         patch = self._render_sensor_patch(source_patch, mode)
                         photo = ImageTk.PhotoImage(patch)
