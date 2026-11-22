@@ -14,7 +14,7 @@ import mss
 from PIL import Image, ImageTk, ImageFilter, ImageDraw, ImageFont
 from nudenet import NudeDetector
 
-APP_TITLE = "Screen Censor 4.6"
+APP_TITLE = "Screen Censor 4.7"
 # NudeNet classes used for breast/genital-area censoring. Covered labels are
 # supported only if the bundled model actually emits them.
 CENSOR_LABELS = {
@@ -67,7 +67,7 @@ class ScreenCensor:
             raise RuntimeError("Screen Censor 4.0 Desktop Overlay hanya untuk Windows 10/11.")
         self.root = root
         root.title(APP_TITLE)
-        root.geometry("470x360")
+        root.geometry("500x455")
         root.resizable(False, False)
         root.configure(bg="#151923")
         root.attributes("-topmost", True)
@@ -83,6 +83,8 @@ class ScreenCensor:
         self.rendered_patch_version = -1
         self.sensor_mode = tk.StringVar(value="Blur + LOOSER")
         self.scan_target = tk.StringVar(value="Semua target")
+        self.custom_text = tk.StringVar(value="LOOSER")
+        self.text_color = tk.StringVar(value="Putih")
         self.full_blur_image = None
         self.detector = None
         self.worker = None
@@ -93,7 +95,7 @@ class ScreenCensor:
         self.track_records = []  # short-lived motion tracks smooth brief detection gaps
         self.hotkey_registered = False
 
-        tk.Label(root, text="SCREEN CENSOR 4.6", fg="white", bg="#151923",
+        tk.Label(root, text="SCREEN CENSOR 4.7", fg="white", bg="#151923",
                  font=("Segoe UI", 17, "bold")).pack(pady=(16, 3))
         tk.Label(root, text="Desktop blur overlay • wajah + area tubuh terdeteksi model",
                  fg="#b9c2d0", bg="#151923", font=("Segoe UI", 9)).pack()
@@ -121,6 +123,7 @@ class ScreenCensor:
         self.mode_menu = tk.OptionMenu(
             mode_row, self.sensor_mode,
             "Blur + LOOSER", "LOOSER tunggal", "TV semut", "Blur semua + fokus",
+            "Kotak hitam", "Pixelate", "Glitch", "Teks custom", "Emoji cover",
             command=self._change_sensor_mode
         )
         self.mode_menu.config(bg="#283244", fg="white", activebackground="#35445c",
@@ -142,10 +145,32 @@ class ScreenCensor:
         self.target_menu["menu"].config(bg="#283244", fg="white")
         self.target_menu.pack(side="left")
 
+        text_row = tk.Frame(root, bg="#151923")
+        text_row.pack(fill="x", padx=18, pady=(10, 0))
+        tk.Label(text_row, text="Teks sensor:", fg="#b9c2d0", bg="#151923",
+                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 7))
+        self.custom_entry = tk.Entry(text_row, textvariable=self.custom_text, width=19,
+                                     bg="#283244", fg="white", insertbackground="white",
+                                     relief="flat")
+        self.custom_entry.pack(side="left", padx=(0, 8), ipady=4)
+        self.custom_entry.bind("<KeyRelease>", self._custom_text_changed)
+        tk.Label(text_row, text="Warna:", fg="#b9c2d0", bg="#151923",
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 5))
+        self.color_menu = tk.OptionMenu(
+            text_row, self.text_color, "Putih", "Merah", "Kuning", "Cyan", "Hijau",
+            command=self._change_text_color
+        )
+        self.color_menu.config(bg="#283244", fg="white", activebackground="#35445c",
+                               activeforeground="white", relief="flat", highlightthickness=0)
+        self.color_menu["menu"].config(bg="#283244", fg="white")
+        self.color_menu.pack(side="left")
+
         tk.Label(root, text="Blur semua + fokus: layar diblur, area target terdeteksi tetap jelas.",
                  fg="#9aa5b5", bg="#151923", font=("Segoe UI", 8)).pack(pady=(8, 0))
+        tk.Label(root, text="Preset: blur • teks • TV semut • kotak hitam • pixelate • glitch • emoji",
+                 fg="#9aa5b5", bg="#151923", font=("Segoe UI", 8)).pack(pady=(5, 0))
         tk.Label(root, text="Tombol darurat global: Ctrl + Shift + F12",
-                 fg="#ffd166", bg="#151923", font=("Segoe UI", 9, "bold")).pack(pady=(14, 3))
+                 fg="#ffd166", bg="#151923", font=("Segoe UI", 9, "bold")).pack(pady=(10, 3))
         tk.Label(root, text="Overlay desktop di atas aplikasi lain • LOOSER menutup area mata",
                  fg="#9aa5b5", bg="#151923", font=("Segoe UI", 8)).pack()
         tk.Label(root, text="Deteksi wajah berlaku untuk semua wajah; aplikasi tidak menebak gender.",
@@ -283,6 +308,23 @@ class ScreenCensor:
         with self.lock:
             self.patch_version += 1
 
+    def _custom_text_changed(self, _event=None):
+        with self.lock:
+            self.patch_version += 1
+
+    def _change_text_color(self, _selected=None):
+        with self.lock:
+            self.patch_version += 1
+
+    def _selected_text_color(self):
+        return {
+            "Putih": "#ffffff",
+            "Merah": "#ff4040",
+            "Kuning": "#ffe45c",
+            "Cyan": "#55eaff",
+            "Hijau": "#65f08a",
+        }.get(self.text_color.get(), "#ffffff")
+
     def _change_scan_target(self, _selected=None):
         # Target selection affects the next AI scan; clear old detections immediately.
         with self.lock:
@@ -299,14 +341,66 @@ class ScreenCensor:
         return noise
 
     def _render_sensor_patch(self, source_patch, mode):
-        if mode == "Blur + LOOSER":
+        if mode in ("Blur + LOOSER", "Blur semua + fokus"):
             return source_patch.filter(ImageFilter.GaussianBlur(BLUR_RADIUS))
-        if mode == "LOOSER tunggal":
-            # The actual target is left untouched; a single label is drawn by the canvas.
-            return source_patch
         if mode == "TV semut":
             return self._make_static_noise(source_patch.size)
+        if mode == "Pixelate":
+            w, h = source_patch.size
+            tiny = source_patch.resize((max(1, w // 14), max(1, h // 14)), Image.Resampling.BILINEAR)
+            return tiny.resize((w, h), Image.Resampling.NEAREST)
+        if mode == "Glitch":
+            image = source_patch.copy()
+            draw = ImageDraw.Draw(image)
+            w, h = image.size
+            # Opaque dark base plus offset color bars fully conceal the target.
+            draw.rectangle((0, 0, w, h), fill=(8, 10, 18))
+            bar_h = max(2, h // 9)
+            for i, color in enumerate(((255, 45, 90), (30, 220, 255), (245, 245, 245))):
+                yy = (i * 3 + 1) * bar_h
+                if yy < h:
+                    draw.rectangle((0, yy, w, min(h, yy + bar_h)), fill=color)
+            return image
+        if mode in ("Kotak hitam", "Teks custom", "Emoji cover"):
+            return Image.new("RGB", source_patch.size, (5, 5, 8))
         return source_patch.filter(ImageFilter.GaussianBlur(BLUR_RADIUS))
+
+    def _draw_custom_label(self, x, y, patch_w, patch_h, label, mode):
+        color = self._selected_text_color()
+        text = self.custom_text.get().strip() or "LOOSER"
+        if mode == "Emoji cover":
+            text = "😎"
+            color = "#ffffff"
+        if label == "face" and mode in ("LOOSER tunggal", "Teks custom", "Blur + LOOSER"):
+            # Cover the eye line with a solid strip before drawing any label.
+            x1 = x + int(patch_w * 0.04)
+            x2 = x + int(patch_w * 0.96)
+            y1 = y + int(patch_h * 0.29)
+            y2 = y + int(patch_h * 0.60)
+        else:
+            x1, y1, x2, y2 = x, y, x + patch_w, y + patch_h
+        if mode == "LOOSER tunggal":
+            self.canvas.create_rectangle(x1, y1, x2, y2, fill="#050505", outline="#050505", width=0)
+            display_text = text
+        elif mode == "Teks custom":
+            self.canvas.create_rectangle(x1, y1, x2, y2, fill="#050505", outline="#050505", width=0)
+            display_text = text
+        elif mode == "Blur + LOOSER":
+            display_text = text
+        elif mode == "Emoji cover":
+            display_text = text
+            self.canvas.create_rectangle(x1, y1, x2, y2, fill="#050505", outline="#050505", width=0)
+        else:
+            display_text = text
+            self.canvas.create_rectangle(x1, y1, x2, y2, fill="#050505", outline="#050505", width=0)
+        font_size = max(10, min(30, int(max(1, y2 - y1) * 0.72)))
+        self.canvas.create_text(
+            (x1 + x2) / 2, (y1 + y2) / 2, text=display_text,
+            anchor="center", fill=color,
+            font=("Segoe UI Emoji" if mode == "Emoji cover" else "Segoe UI",
+                  font_size, "bold"),
+            width=max(30, x2 - x1 - 6)
+        )
 
     def start(self):
         if self.running:
@@ -586,43 +680,13 @@ class ScreenCensor:
                         self.canvas.create_image(0, 0, image=photo, anchor="nw")
                 else:
                     for x, y, source_patch, label in patches:
-                        if mode == "LOOSER tunggal":
-                            patch_w, patch_h = source_patch.size
-                            if label == "face":
-                                # Cover the eye band with a solid, borderless strip.
-                                # The white word is drawn on top; the eyes underneath
-                                # are fully obscured instead of remaining visible
-                                # through transparent text.
-                                eye_x1 = x + int(patch_w * 0.07)
-                                eye_x2 = x + int(patch_w * 0.93)
-                                eye_y1 = y + int(patch_h * 0.30)
-                                eye_y2 = y + int(patch_h * 0.58)
-                                band_h = max(1, eye_y2 - eye_y1)
-                                font_size = max(11, min(28, int(band_h * 0.78)))
-                                self.canvas.create_rectangle(
-                                    eye_x1, eye_y1, eye_x2, eye_y2,
-                                    fill="#050505", outline="#050505", width=0
-                                )
-                                self.canvas.create_text(
-                                    (eye_x1 + eye_x2) / 2,
-                                    (eye_y1 + eye_y2) / 2,
-                                    text="LOOSER", anchor="center", fill="white",
-                                    font=("Segoe UI", font_size, "bold"),
-                                    width=max(40, eye_x2 - eye_x1 - 4)
-                                )
-                            else:
-                                # Non-face targets keep a single centered label.
-                                self.canvas.create_text(
-                                    x + patch_w / 2, y + patch_h / 2,
-                                    text="LOOSER", anchor="center", fill="white",
-                                    font=("Segoe UI", max(10, min(24, patch_h // 2)), "bold"),
-                                    width=max(70, patch_w - 8)
-                                )
-                            continue
                         patch = self._render_sensor_patch(source_patch, mode)
                         photo = ImageTk.PhotoImage(patch)
                         self.patch_images.append(photo)
                         self.canvas.create_image(x, y, image=photo, anchor="nw")
+                        if mode in ("LOOSER tunggal", "Teks custom", "Emoji cover", "Blur + LOOSER"):
+                            patch_w, patch_h = source_patch.size
+                            self._draw_custom_label(x, y, patch_w, patch_h, label, mode)
                 self.rendered_patch_version = version
             self.overlay.lift()
         self.root.after(OVERLAY_REFRESH_MS, self.refresh_overlay)
