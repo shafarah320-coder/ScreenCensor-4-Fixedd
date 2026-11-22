@@ -14,7 +14,7 @@ import mss
 from PIL import Image, ImageTk, ImageFilter, ImageDraw, ImageFont
 from nudenet import NudeDetector
 
-APP_TITLE = "Screen Censor 4.5"
+APP_TITLE = "Screen Censor 4.6"
 # NudeNet classes used for breast/genital-area censoring. Covered labels are
 # supported only if the bundled model actually emits them.
 CENSOR_LABELS = {
@@ -29,8 +29,8 @@ LABEL_THRESHOLDS = {
     "FEMALE_GENITALIA_EXPOSED": 0.28,
     "FEMALE_GENITALIA_COVERED": 0.35,
 }
-SMOOTHING_ALPHA = 0.72  # follows new detections faster while reducing jitter
-DETECTION_INTERVAL = 0.20      # Requested scan interval; actual AI speed depends on PC/model.
+SMOOTHING_ALPHA = 0.52  # balances responsiveness and stable movement
+DETECTION_INTERVAL = 0.15      # Tracking updates about 6-7 times/sec; actual speed depends on PC/model.
 OVERLAY_REFRESH_MS = 16        # UI refresh target: about 60 Hz; not 60 AI detections/sec.
 BOX_PADDING = 0.22
 BLUR_RADIUS = 15
@@ -90,9 +90,10 @@ class ScreenCensor:
         self.last_error = None
         self.frame_size = (0, 0)
         self.previous_boxes = []
+        self.track_records = []  # short-lived motion tracks smooth brief detection gaps
         self.hotkey_registered = False
 
-        tk.Label(root, text="SCREEN CENSOR 4.5", fg="white", bg="#151923",
+        tk.Label(root, text="SCREEN CENSOR 4.6", fg="white", bg="#151923",
                  font=("Segoe UI", 17, "bold")).pack(pady=(16, 3))
         tk.Label(root, text="Desktop blur overlay • wajah + area tubuh terdeteksi model",
                  fg="#b9c2d0", bg="#151923", font=("Segoe UI", 9)).pack()
@@ -287,6 +288,7 @@ class ScreenCensor:
         with self.lock:
             self.boxes = []
             self.previous_boxes = []
+            self.track_records = []
             self.patch_data = []
             self.patch_version += 1
 
@@ -409,32 +411,101 @@ class ScreenCensor:
         return kept
 
     @staticmethod
-    def _smooth_boxes(current, previous, alpha=SMOOTHING_ALPHA):
-        """Match nearby detections and smooth their coordinates to reduce jitter."""
-        smoothed = []
-        used = set()
+    def _box_iou(a, b):
+        ax1, ay1, ax2, ay2 = a[:4]
+        bx1, by1, bx2, by2 = b[:4]
+        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+        intersection = iw * ih
+        area_a = max(1, ax2 - ax1) * max(1, ay2 - ay1)
+        area_b = max(1, bx2 - bx1) * max(1, by2 - by1)
+        return intersection / max(1, area_a + area_b - intersection)
+
+    def _smooth_boxes(self, current, previous=None, alpha=SMOOTHING_ALPHA):
+        """Associate detections with short-lived motion tracks to reduce jitter."""
+        records = getattr(self, "track_records", [])
+        candidates = []
+
+        # Match each new detection to the closest compatible predicted track.
+        unmatched = set(range(len(records)))
         for box in current:
             x1, y1, x2, y2, label = box
-            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
             bw, bh = max(1, x2 - x1), max(1, y2 - y1)
-            best_i, best_dist = None, float("inf")
-            for i, old in enumerate(previous):
-                if i in used or old[4] != label:
+            best_index, best_cost = None, float("inf")
+
+            for index in unmatched:
+                record = records[index]
+                if record["label"] != label:
                     continue
-                ox1, oy1, ox2, oy2, _ = old
-                ocx, ocy = (ox1 + ox2) / 2, (oy1 + oy2) / 2
-                dist = ((cx - ocx) ** 2 + (cy - ocy) ** 2) ** 0.5
-                if dist < max(bw, bh) * 0.8 and dist < best_dist:
-                    best_i, best_dist = i, dist
-            if best_i is not None:
-                used.add(best_i)
-                old = previous[best_i]
-                coords = [round(alpha * new + (1 - alpha) * oldv)
-                          for new, oldv in zip((x1, y1, x2, y2), old[:4])]
-                smoothed.append((*coords, label))
-            else:
-                smoothed.append(box)
-        return smoothed
+                predicted = record["box"]
+                pcx = (predicted[0] + predicted[2]) / 2
+                pcy = (predicted[1] + predicted[3]) / 2
+                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                distance = ((cx - pcx) ** 2 + (cy - pcy) ** 2) ** 0.5
+                scale = max(bw, bh, predicted[2] - predicted[0], predicted[3] - predicted[1])
+                overlap = self._box_iou(box, predicted)
+                if distance < scale * 1.35 or overlap > 0.05:
+                    cost = distance / max(1, scale) - overlap * 0.65
+                    if cost < best_cost:
+                        best_index, best_cost = index, cost
+
+            if best_index is None:
+                candidates.append({
+                    "box": [x1, y1, x2, y2],
+                    "label": label,
+                    "velocity": [0.0, 0.0, 0.0, 0.0],
+                    "misses": 0,
+                })
+                continue
+
+            unmatched.remove(best_index)
+            old = records[best_index]
+            old_box = old["box"]
+            velocity = old["velocity"]
+            predicted = [old_box[i] + velocity[i] for i in range(4)]
+            # Smooth against the motion prediction rather than the last raw box.
+            smoothed = [
+                round((1 - alpha) * predicted[i] + alpha * box[i])
+                for i in range(4)
+            ]
+            delta = [box[i] - old_box[i] for i in range(4)]
+            new_velocity = [
+                0.60 * velocity[i] + 0.40 * delta[i] for i in range(4)
+            ]
+            candidates.append({
+                "box": smoothed,
+                "label": label,
+                "velocity": new_velocity,
+                "misses": 0,
+            })
+
+        # Keep a very short prediction through one or two missed AI scans.
+        # This prevents the censor from blinking off during a brief detection miss.
+        for index in unmatched:
+            old = records[index]
+            misses = old["misses"] + 1
+            max_misses = 2 if old["label"] == "face" else 1
+            if misses <= max_misses:
+                velocity = old["velocity"]
+                predicted = [
+                    round(old["box"][i] + velocity[i] * 0.75)
+                    for i in range(4)
+                ]
+                candidates.append({
+                    "box": predicted,
+                    "label": old["label"],
+                    "velocity": [v * 0.65 for v in velocity],
+                    "misses": misses,
+                })
+
+        self.track_records = candidates
+        result = []
+        for record in candidates:
+            x1, y1, x2, y2 = record["box"]
+            if x2 > x1 and y2 > y1:
+                result.append((int(x1), int(y1), int(x2), int(y2), record["label"]))
+        return result
 
     def _scan_loop(self):
         with mss.mss() as sct:
@@ -446,10 +517,10 @@ class ScreenCensor:
                 h, w = frame.shape[:2]
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 # Detect faces on a downscaled frame for speed, then restore coordinates.
-                scale = 0.5 if max(w, h) >= 1400 else 0.75
+                scale = 0.60 if max(w, h) >= 1400 else 0.80
                 small = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
                 faces = self.face_cascade.detectMultiScale(
-                    small, scaleFactor=1.08, minNeighbors=4, minSize=(22, 22)
+                    small, scaleFactor=1.06, minNeighbors=5, minSize=(26, 26)
                 )
                 boxes = []
                 inv = 1.0 / scale
@@ -468,8 +539,8 @@ class ScreenCensor:
                 with self.lock:
                     previous = list(self.previous_boxes)
                 boxes = self._smooth_boxes(boxes, previous)
-                # Prepare blurred screen patches. The live overlay renderer only
-                # redraws these cached patches at 30 FPS; AI inference runs slower.
+                # Prepare screen patches after smoothing/prediction. The overlay
+                # refreshes independently; AI detection cadence depends on the PC.
                 patches = []
                 screen = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
                 for x1,y1,x2,y2,label in boxes:
@@ -569,6 +640,7 @@ class ScreenCensor:
         with self.lock:
             self.boxes = []
             self.previous_boxes = []
+            self.track_records = []
             self.patch_data = []
         self.canvas.delete("all")
         self.patch_images = []
