@@ -14,7 +14,7 @@ import mss
 from PIL import Image, ImageTk, ImageFilter, ImageDraw, ImageFont
 from nudenet import NudeDetector
 
-APP_TITLE = "Screen Censor 4.7"
+APP_TITLE = "Screen Censor 4.8"
 # NudeNet classes used for breast/genital-area censoring. Covered labels are
 # supported only if the bundled model actually emits them.
 CENSOR_LABELS = {
@@ -29,8 +29,8 @@ LABEL_THRESHOLDS = {
     "FEMALE_GENITALIA_EXPOSED": 0.28,
     "FEMALE_GENITALIA_COVERED": 0.35,
 }
-SMOOTHING_ALPHA = 0.52  # balances responsiveness and stable movement
-DETECTION_INTERVAL = 0.15      # Tracking updates about 6-7 times/sec; actual speed depends on PC/model.
+SMOOTHING_ALPHA = 0.28  # lower raw-detection weight reduces box jitter
+DETECTION_INTERVAL = 0.12      # Faster scan cadence; actual speed depends on PC/model.
 OVERLAY_REFRESH_MS = 16        # UI refresh target: about 60 Hz; not 60 AI detections/sec.
 BOX_PADDING = 0.22
 BLUR_RADIUS = 15
@@ -67,9 +67,9 @@ class ScreenCensor:
             raise RuntimeError("Screen Censor 4.0 Desktop Overlay hanya untuk Windows 10/11.")
         self.root = root
         root.title(APP_TITLE)
-        root.geometry("500x455")
+        root.geometry("540x590")
         root.resizable(False, False)
-        root.configure(bg="#151923")
+        root.configure(bg="#111827")
         root.attributes("-topmost", True)
 
         self.running = False
@@ -95,86 +95,102 @@ class ScreenCensor:
         self.track_records = []  # short-lived motion tracks smooth brief detection gaps
         self.hotkey_registered = False
 
-        tk.Label(root, text="SCREEN CENSOR 4.7", fg="white", bg="#151923",
-                 font=("Segoe UI", 17, "bold")).pack(pady=(16, 3))
-        tk.Label(root, text="Desktop blur overlay • wajah + area tubuh terdeteksi model",
-                 fg="#b9c2d0", bg="#151923", font=("Segoe UI", 9)).pack()
+        # Dark, card-based control panel with clearer grouping.
+        tk.Label(root, text="SCREEN CENSOR", fg="#f4f7ff", bg="#111827",
+                 font=("Segoe UI", 19, "bold")).pack(pady=(18, 2))
+        tk.Label(root, text="SMART DESKTOP OVERLAY  •  VERSION 4.8", fg="#7dd3fc",
+                 bg="#111827", font=("Segoe UI", 8, "bold")).pack()
 
-        self.status = tk.Label(root, text="Status: Mati", fg="#ff7777",
-                               bg="#151923", font=("Segoe UI", 10, "bold"))
-        self.status.pack(pady=12)
+        self.status = tk.Label(root, text="●  SENSOR NONAKTIF", fg="#fb7185",
+                               bg="#111827", font=("Segoe UI", 10, "bold"))
+        self.status.pack(pady=(13, 10))
 
-        row = tk.Frame(root, bg="#151923")
+        action_card = tk.Frame(root, bg="#1f2937", padx=14, pady=12)
+        action_card.pack(fill="x", padx=18, pady=5)
+        row = tk.Frame(action_card, bg="#1f2937")
         row.pack()
-        self.start_btn = tk.Button(row, text="MULAI SENSOR", width=16,
-                                   command=self.start, bg="#238b57", fg="white",
-                                   relief="flat", font=("Segoe UI", 10, "bold"))
+        self.start_btn = tk.Button(row, text="▶  MULAI SENSOR", width=18,
+                                   command=self.start, bg="#0d9488", fg="white",
+                                   activebackground="#0f766e", activeforeground="white",
+                                   relief="flat", font=("Segoe UI", 10, "bold"), pady=8)
         self.start_btn.pack(side="left", padx=5)
-        self.stop_btn = tk.Button(row, text="MATIKAN", width=12,
+        self.stop_btn = tk.Button(row, text="■  MATIKAN", width=14,
                                   command=self.stop, state="disabled",
-                                  bg="#a83e45", fg="white", relief="flat",
-                                  font=("Segoe UI", 10, "bold"))
+                                  bg="#be123c", fg="white", activebackground="#9f1239",
+                                  activeforeground="white", relief="flat",
+                                  font=("Segoe UI", 10, "bold"), pady=8)
         self.stop_btn.pack(side="left", padx=5)
 
-        mode_row = tk.Frame(root, bg="#151923")
-        mode_row.pack(pady=(2, 0))
-        tk.Label(mode_row, text="Tipe sensor:", fg="#b9c2d0", bg="#151923",
-                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 8))
+        settings = tk.Frame(root, bg="#1f2937", padx=16, pady=12)
+        settings.pack(fill="x", padx=18, pady=7)
+        tk.Label(settings, text="PENGATURAN SENSOR", fg="#e5e7eb", bg="#1f2937",
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 8))
+
+        mode_row = tk.Frame(settings, bg="#1f2937")
+        mode_row.pack(fill="x", pady=4)
+        tk.Label(mode_row, text="Gaya sensor", width=14, anchor="w", fg="#cbd5e1",
+                 bg="#1f2937", font=("Segoe UI", 9)).pack(side="left")
         self.mode_menu = tk.OptionMenu(
             mode_row, self.sensor_mode,
             "Blur + LOOSER", "LOOSER tunggal", "TV semut", "Blur semua + fokus",
             "Kotak hitam", "Pixelate", "Glitch", "Teks custom", "Emoji cover",
             command=self._change_sensor_mode
         )
-        self.mode_menu.config(bg="#283244", fg="white", activebackground="#35445c",
-                              activeforeground="white", relief="flat", highlightthickness=0)
-        self.mode_menu["menu"].config(bg="#283244", fg="white")
-        self.mode_menu.pack(side="left")
+        self.mode_menu.config(bg="#334155", fg="white", activebackground="#475569",
+                              activeforeground="white", relief="flat", highlightthickness=0,
+                              width=23)
+        self.mode_menu["menu"].config(bg="#334155", fg="white")
+        self.mode_menu.pack(side="left", fill="x", expand=True)
 
-        target_row = tk.Frame(root, bg="#151923")
-        target_row.pack(pady=(10, 0))
-        tk.Label(target_row, text="Scan bagian:", fg="#b9c2d0", bg="#151923",
-                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 8))
+        target_row = tk.Frame(settings, bg="#1f2937")
+        target_row.pack(fill="x", pady=4)
+        tk.Label(target_row, text="Area deteksi", width=14, anchor="w", fg="#cbd5e1",
+                 bg="#1f2937", font=("Segoe UI", 9)).pack(side="left")
         self.target_menu = tk.OptionMenu(
             target_row, self.scan_target,
-            "Semua target", "Dada saja", "Wajah saja", "Bagian intim saja",
+            "Semua target", "Dada saja", "Wajah saja", "Bagian intim saja", "Tubuh penuh",
             command=self._change_scan_target
         )
-        self.target_menu.config(bg="#283244", fg="white", activebackground="#35445c",
-                                activeforeground="white", relief="flat", highlightthickness=0)
-        self.target_menu["menu"].config(bg="#283244", fg="white")
-        self.target_menu.pack(side="left")
+        self.target_menu.config(bg="#334155", fg="white", activebackground="#475569",
+                                activeforeground="white", relief="flat", highlightthickness=0,
+                                width=23)
+        self.target_menu["menu"].config(bg="#334155", fg="white")
+        self.target_menu.pack(side="left", fill="x", expand=True)
 
-        text_row = tk.Frame(root, bg="#151923")
-        text_row.pack(fill="x", padx=18, pady=(10, 0))
-        tk.Label(text_row, text="Teks sensor:", fg="#b9c2d0", bg="#151923",
-                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 7))
-        self.custom_entry = tk.Entry(text_row, textvariable=self.custom_text, width=19,
-                                     bg="#283244", fg="white", insertbackground="white",
+        text_row = tk.Frame(settings, bg="#1f2937")
+        text_row.pack(fill="x", pady=(9, 3))
+        tk.Label(text_row, text="Tulisan", width=14, anchor="w", fg="#cbd5e1",
+                 bg="#1f2937", font=("Segoe UI", 9)).pack(side="left")
+        self.custom_entry = tk.Entry(text_row, textvariable=self.custom_text, width=17,
+                                     bg="#334155", fg="white", insertbackground="white",
                                      relief="flat")
-        self.custom_entry.pack(side="left", padx=(0, 8), ipady=4)
+        self.custom_entry.pack(side="left", padx=(0, 8), ipady=5)
         self.custom_entry.bind("<KeyRelease>", self._custom_text_changed)
-        tk.Label(text_row, text="Warna:", fg="#b9c2d0", bg="#151923",
-                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 5))
+        tk.Label(text_row, text="Warna", fg="#cbd5e1", bg="#1f2937",
+                 font=("Segoe UI", 9)).pack(side="left", padx=(2, 5))
         self.color_menu = tk.OptionMenu(
             text_row, self.text_color, "Putih", "Merah", "Kuning", "Cyan", "Hijau",
             command=self._change_text_color
         )
-        self.color_menu.config(bg="#283244", fg="white", activebackground="#35445c",
+        self.color_menu.config(bg="#334155", fg="white", activebackground="#475569",
                                activeforeground="white", relief="flat", highlightthickness=0)
-        self.color_menu["menu"].config(bg="#283244", fg="white")
+        self.color_menu["menu"].config(bg="#334155", fg="white")
         self.color_menu.pack(side="left")
 
-        tk.Label(root, text="Blur semua + fokus: layar diblur, area target terdeteksi tetap jelas.",
-                 fg="#9aa5b5", bg="#151923", font=("Segoe UI", 8)).pack(pady=(8, 0))
-        tk.Label(root, text="Preset: blur • teks • TV semut • kotak hitam • pixelate • glitch • emoji",
-                 fg="#9aa5b5", bg="#151923", font=("Segoe UI", 8)).pack(pady=(5, 0))
-        tk.Label(root, text="Tombol darurat global: Ctrl + Shift + F12",
-                 fg="#ffd166", bg="#151923", font=("Segoe UI", 9, "bold")).pack(pady=(10, 3))
-        tk.Label(root, text="Overlay desktop di atas aplikasi lain • LOOSER menutup area mata",
-                 fg="#9aa5b5", bg="#151923", font=("Segoe UI", 8)).pack()
-        tk.Label(root, text="Deteksi wajah berlaku untuk semua wajah; aplikasi tidak menebak gender.",
-                 fg="#9aa5b5", bg="#151923", font=("Segoe UI", 8)).pack(pady=(3, 0))
+        help_card = tk.Frame(root, bg="#172033", padx=14, pady=10)
+        help_card.pack(fill="x", padx=18, pady=(4, 6))
+        tk.Label(help_card, text="INFO & KONTROL", fg="#7dd3fc", bg="#172033",
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        tk.Label(help_card, text="LOOSER tunggal: tulisan tanpa kotak, diposisikan di garis mata.",
+                 fg="#d1d5db", bg="#172033", font=("Segoe UI", 8),
+                 wraplength=470, justify="left").pack(anchor="w", pady=(5, 2))
+        tk.Label(help_card, text="Tubuh penuh memakai deteksi person OpenCV; area dada/intim memakai model NudeNet.",
+                 fg="#d1d5db", bg="#172033", font=("Segoe UI", 8),
+                 wraplength=470, justify="left").pack(anchor="w", pady=2)
+        tk.Label(help_card, text="Darurat: Ctrl + Shift + F12  •  Overlay berada di atas aplikasi lain",
+                 fg="#fbbf24", bg="#172033", font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(5, 0))
+        tk.Label(root, text="Catatan: deteksi wajah tidak mengklasifikasikan gender secara otomatis.",
+                 fg="#94a3b8", bg="#111827", font=("Segoe UI", 8)).pack(pady=(2, 8))
 
         self.overlay = tk.Toplevel(root)
         self.overlay.withdraw()
@@ -299,7 +315,7 @@ class ScreenCensor:
         self.overlay_hwnd = hwnd
         if affinity_mode is None:
             self.status.config(
-                text="Status: AKTIF (capture exclusion unavailable)",
+                text="●  SENSOR AKTIF (capture exclusion unavailable)",
                 fg="#65d69a"
             )
 
@@ -372,7 +388,7 @@ class ScreenCensor:
             text = "😎"
             color = "#ffffff"
         if label == "face" and mode in ("LOOSER tunggal", "Teks custom", "Blur + LOOSER"):
-            # Cover the eye line with a solid strip before drawing any label.
+            # Estimate the eye band from the face box; text is drawn without a backing box.
             x1 = x + int(patch_w * 0.04)
             x2 = x + int(patch_w * 0.96)
             y1 = y + int(patch_h * 0.29)
@@ -380,8 +396,11 @@ class ScreenCensor:
         else:
             x1, y1, x2, y2 = x, y, x + patch_w, y + patch_h
         if mode == "LOOSER tunggal":
-            self.canvas.create_rectangle(x1, y1, x2, y2, fill="#050505", outline="#050505", width=0)
+            # Text only: no background/box. Anchor the word across the eye line.
             display_text = text
+            if label == "face":
+                y1 = y + int(patch_h * 0.43)
+                y2 = y1 + max(1, int(patch_h * 0.12))
         elif mode == "Teks custom":
             self.canvas.create_rectangle(x1, y1, x2, y2, fill="#050505", outline="#050505", width=0)
             display_text = text
@@ -418,6 +437,8 @@ class ScreenCensor:
             self.face_cascade = cv2.CascadeClassifier(cascade_path)
             if self.face_cascade.empty():
                 raise RuntimeError("Model deteksi wajah OpenCV tidak ditemukan.")
+            self.hog = cv2.HOGDescriptor()
+            self.hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
             if self.stop_event.is_set():
                 self.root.after(0, self._stopped_ui)
                 return
@@ -435,7 +456,7 @@ class ScreenCensor:
         try:
             self._configure_overlay()
             if "capture exclusion unavailable" not in self.status.cget("text"):
-                self.status.config(text="Status: AKTIF", fg="#65d69a")
+                self.status.config(text="●  SENSOR AKTIF", fg="#65d69a")
             self.stop_btn.config(state="normal")
         except Exception as exc:
             self.running = False
@@ -565,7 +586,7 @@ class ScreenCensor:
             ]
             delta = [box[i] - old_box[i] for i in range(4)]
             new_velocity = [
-                0.60 * velocity[i] + 0.40 * delta[i] for i in range(4)
+                0.78 * velocity[i] + 0.22 * delta[i] for i in range(4)
             ]
             candidates.append({
                 "box": smoothed,
@@ -579,17 +600,17 @@ class ScreenCensor:
         for index in unmatched:
             old = records[index]
             misses = old["misses"] + 1
-            max_misses = 2 if old["label"] == "face" else 1
+            max_misses = 3 if old["label"] in ("face", "person") else 2
             if misses <= max_misses:
                 velocity = old["velocity"]
                 predicted = [
-                    round(old["box"][i] + velocity[i] * 0.75)
+                    round(old["box"][i] + velocity[i] * 0.65)
                     for i in range(4)
                 ]
                 candidates.append({
                     "box": predicted,
                     "label": old["label"],
-                    "velocity": [v * 0.65 for v in velocity],
+                    "velocity": [v * 0.72 for v in velocity],
                     "misses": misses,
                 })
 
@@ -600,6 +621,30 @@ class ScreenCensor:
             if x2 > x1 and y2 > y1:
                 result.append((int(x1), int(y1), int(x2), int(y2), record["label"]))
         return result
+
+    def _person_boxes(self, frame):
+        """Detect full human silhouettes and return padded proportional boxes."""
+        h, w = frame.shape[:2]
+        scale = 0.55 if max(w, h) >= 1400 else 0.70
+        small = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        rects, weights = self.hog.detectMultiScale(
+            small, winStride=(8, 8), padding=(8, 8), scale=1.05
+        )
+        found = []
+        inv = 1.0 / scale
+        for (x, y, pw, ph), score in zip(rects, weights):
+            if float(score) < 0.15:
+                continue
+            # Keep natural human width/height proportions and add a small safety margin.
+            pad_x = int(pw * 0.08)
+            pad_y = int(ph * 0.05)
+            x1 = max(0, int(x * inv) - int(pad_x * inv))
+            y1 = max(0, int(y * inv) - int(pad_y * inv))
+            x2 = min(w, int((x + pw) * inv) + int(pad_x * inv))
+            y2 = min(h, int((y + ph) * inv) + int(pad_y * inv))
+            if x2 > x1 and y2 > y1:
+                found.append((x1, y1, x2, y2, "person"))
+        return self._dedupe(found)
 
     def _scan_loop(self):
         with mss.mss() as sct:
@@ -630,6 +675,8 @@ class ScreenCensor:
                     for item_box in self._nudenet_boxes(frame):
                         if wanted is None or item_box[4] == wanted:
                             boxes.append(item_box)
+                if selected in ("Semua target", "Tubuh penuh"):
+                    boxes.extend(self._person_boxes(frame))
                 with self.lock:
                     previous = list(self.previous_boxes)
                 boxes = self._smooth_boxes(boxes, previous)
@@ -692,7 +739,7 @@ class ScreenCensor:
         self.root.after(OVERLAY_REFRESH_MS, self.refresh_overlay)
 
     def _failed(self, error):
-        self.status.config(text="Sensor gagal / berhenti", fg="#ff7777")
+        self.status.config(text="●  SENSOR GAGAL / BERHENTI", fg="#ff7777")
         messagebox.showerror(APP_TITLE, "Gagal menjalankan sensor:\n\n" + error)
 
     def _stopped_ui(self):
@@ -711,7 +758,7 @@ class ScreenCensor:
         self.start_btn.config(state="normal")
         self.stop_btn.config(state="disabled")
         if not self.closing:
-            self.status.config(text="Status: Mati", fg="#ff7777")
+            self.status.config(text="●  SENSOR NONAKTIF", fg="#ff7777")
 
     def stop(self):
         self.running = False
